@@ -22,7 +22,10 @@ except Exception:
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from equation_engine import PRESETS, make_plot, parse_input, solve_steps
+from equation_engine import (
+    PRESETS, compute_text, make_plot, parse_input, parse_system,
+    render_input, solve_steps, system_steps,
+)
 
 BODY_FONT = ("Segoe UI", 11)
 
@@ -45,6 +48,32 @@ class App(tk.Tk):
         ttk.Button(top, text="Derivative", command=lambda: self.plot("derivative")).pack(side="left", padx=2)
         ttk.Button(top, text="Integral", command=lambda: self.plot("integral")).pack(side="left", padx=2)
         ttk.Button(top, text="Solve steps", command=self.show_steps).pack(side="left", padx=2)
+        ttk.Button(top, text="Sliders", command=self.slider_plot).pack(side="left", padx=2)
+        ttk.Button(top, text="Compute", command=self.compute).pack(side="left", padx=2)
+
+        # --- v2 mode buttons: prepend the mode prefix, then plot ---
+        modes = ttk.Frame(self, padding=(10, 0))
+        modes.pack(fill="x")
+        ttk.Label(modes, text="More:").pack(side="left")
+        for label, prefix in [("Multi", "multi:"), ("3D", "3d:"),
+                              ("System", "system:"), ("Implicit", "implicit:"),
+                              ("Parametric", "parametric:"), ("Polar", "polar:")]:
+            ttk.Button(modes, text=label,
+                       command=lambda p=prefix: self.mode_plot(p)).pack(side="left", padx=2)
+
+        # --- v2 sliders for a, b, c (live update while slider mode is on) ---
+        self.slider_mode = False
+        sliders = ttk.Frame(self, padding=(10, 0))
+        sliders.pack(fill="x")
+        ttk.Label(sliders, text="Parameters (sliders mode):").pack(side="left")
+        self.slider_vars = {}
+        for name, default in [("a", 1.0), ("b", -5.0), ("c", 6.0)]:
+            ttk.Label(sliders, text=f"{name}:").pack(side="left", padx=(8, 0))
+            var = tk.DoubleVar(value=default)
+            self.slider_vars[name] = var
+            tk.Scale(sliders, variable=var, from_=-10, to=10, resolution=0.1,
+                     orient="horizontal", length=150,
+                     command=lambda _v: self._on_slider()).pack(side="left")
 
         # --- options row ---
         opts = ttk.Frame(self, padding=(10, 0))
@@ -63,7 +92,7 @@ class App(tk.Tk):
         left = ttk.Frame(main)
         left.pack(side="left", fill="y", padx=(0, 10))
         ttk.Label(left, text="Try an example:", font=BODY_FONT).pack(anchor="w")
-        self.preset_list = tk.Listbox(left, width=42, height=14, font=("Segoe UI", 10))
+        self.preset_list = tk.Listbox(left, width=42, height=28, font=("Segoe UI", 10))
         for label, _ in PRESETS:
             self.preset_list.insert("end", label)
         self.preset_list.pack(fill="y", expand=True)
@@ -97,6 +126,45 @@ class App(tk.Tk):
             return
         self.entry.delete(0, "end")
         self.entry.insert(0, PRESETS[sel[0]][1])
+        self.slider_mode = PRESETS[sel[0]][1].lower().startswith("sliders:")
+        self.plot("plot")
+
+    def compute(self):
+        """Text answer for calc:/limit:/matrix:/ode: inputs."""
+        try:
+            lines = compute_text(self.entry.get())
+        except Exception as exc:  # noqa: BLE001 - user-facing error path
+            messagebox.showerror("Could not compute that", str(exc))
+            self.status.config(text=f"Error: {exc}")
+            return
+        self.results.delete("1.0", "end")
+        self.results.insert("end", "\n".join(lines))
+        self.status.config(text="Answer shown.")
+
+    def _params(self):
+        return {k: float(v.get()) for k, v in self.slider_vars.items()}
+
+    def _on_slider(self):
+        if self.slider_mode:
+            self.plot("plot")
+
+    def slider_plot(self):
+        """Enter slider mode: entry must be a function using a, b, c."""
+        text = self.entry.get()
+        if not text.lower().startswith("sliders:"):
+            self.entry.delete(0, "end")
+            self.entry.insert(0, f"sliders: {text}")
+        self.slider_mode = True
+        self.plot("plot")
+
+    def mode_plot(self, prefix):
+        text = self.entry.get()
+        known = ("multi:", "3d:", "system:", "implicit:", "parametric:",
+                 "polar:", "sliders:")
+        if not text.lower().startswith(known):
+            self.entry.delete(0, "end")
+            self.entry.insert(0, f"{prefix} {text}")
+        self.slider_mode = False
         self.plot("plot")
 
     def _read_float(self, var, name, default):
@@ -107,6 +175,30 @@ class App(tk.Tk):
 
     def plot(self, mode):
         """Parse, plot, and report. Errors are shown, never raised."""
+        # v2 modes (preset prefixes, or slider mode) go through render_input.
+        text = self.entry.get()
+        v2_prefixes = ("multi:", "3d:", "system:", "implicit:",
+                       "parametric:", "polar:", "sliders:", "ode:",
+                       "calc:", "limit:", "matrix:")
+        if text.strip().lower().startswith(v2_prefixes) or self.slider_mode:
+            try:
+                if self.slider_mode and not text.strip().lower().startswith("sliders:"):
+                    text = f"sliders: {text}"
+                fig, info, v2mode = render_input(text, params=self._params())
+            except Exception as exc:  # noqa: BLE001 - user-facing error path
+                messagebox.showerror("Could not plot that", str(exc))
+                self.status.config(text=f"Error: {exc}")
+                return
+            if self.canvas is not None:
+                self.canvas.get_tk_widget().destroy()
+            plt.close("all")
+            self.current_fig = fig
+            self.canvas = FigureCanvasTkAgg(fig, master=self.plot_frame)
+            self.canvas.draw()
+            self.canvas.get_tk_widget().pack(fill="both", expand=True)
+            self._show_info(info, v2mode)
+            self.status.config(text=f"Plotted ({v2mode}): {info.get('expression', '')}")
+            return
         try:
             kind, expr = parse_input(self.entry.get())
             x_min = self._read_float(self.x_min, "x min", -10)
@@ -134,6 +226,41 @@ class App(tk.Tk):
         self.status.config(text=f"Plotted: {info['expression']}")
 
     def _show_info(self, info, mode):
+        if mode in ("multi", "3d", "system", "implicit", "parametric",
+                    "polar", "sliders", "ode", "calc", "limit", "matrix"):
+            lines = [f"Mode: {mode}"]
+            if info.get("general_solution"):
+                lines.append(f"General solution: {info['general_solution']}")
+                if info.get("value_at_0_for_C_1") is not None:
+                    lines.append(f"C = 1 curve at x = 0: "
+                                 f"{info['value_at_0_for_C_1']:g}")
+            if info.get("expression"):
+                lines.append(f"Expression: {info['expression']}")
+            if info.get("functions"):
+                lines.append("Functions plotted:")
+                lines.extend(f"  y = {f}" for f in info["functions"])
+            if info.get("solutions") is not None:
+                if info["solutions"]:
+                    lines.append("Solutions (intersections):")
+                    for sx, sy in info["solutions"]:
+                        fmt = lambda z: f"{z.real:g}" if abs(z.imag) < 1e-9 else str(z)
+                        lines.append(f"  x = {fmt(sx)}, y = {fmt(sy)}")
+                else:
+                    lines.append("No solution found.")
+            if info.get("sample_at_1_2") is not None:
+                lines.append(f"Value at (x=1, y=2): {info['sample_at_1_2']:g}")
+            if info.get("start_point"):
+                px, py = info["start_point"]
+                lines.append(f"Curve starts at ({px:g}, {py:g})")
+            if info.get("r_at_pi_over_6") is not None:
+                lines.append(f"r at theta = pi/6: {info['r_at_pi_over_6']:g}")
+            roots = info.get("roots", [])
+            if roots:
+                lines.append("Roots:")
+                lines.extend(f"  x = {r:g}" for r in roots)
+            self.results.delete("1.0", "end")
+            self.results.insert("end", "\n".join(lines))
+            return
         lines = [f"Equation: y = {info['expression']}"]
         roots = info.get("roots", [])
         if roots:
@@ -154,6 +281,17 @@ class App(tk.Tk):
         self.results.insert("end", "\n".join(lines))
 
     def show_steps(self):
+        text = self.entry.get()
+        if text.strip().lower().startswith("system:"):
+            try:
+                steps = system_steps(parse_system(text.split(":", 1)[1]))
+            except Exception as exc:  # noqa: BLE001 - user-facing error path
+                messagebox.showerror("Could not solve that", str(exc))
+                return
+            self.results.delete("1.0", "end")
+            self.results.insert("end", "\n".join(steps))
+            self.status.config(text="Step-by-step solution shown.")
+            return
         try:
             kind, expr = parse_input(self.entry.get())
             if kind != "equation":
